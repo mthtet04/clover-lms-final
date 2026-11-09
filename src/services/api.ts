@@ -1,4 +1,4 @@
-import type { User, Course, Submission, Enrollment } from '../types';
+import type {Course, Submission, Enrollment } from '../types';
 
 const API_URL = 'http://localhost:3000/api';
 
