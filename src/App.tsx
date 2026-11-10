@@ -10,7 +10,16 @@ function App() {
   const [enrollments, setEnrollments] = useState<Enrollment[]>([]);
   const [submissions, setSubmissions] = useState<Submission[]>([]);
 
-  // Auth Inputs (Initialized as empty strings for a standard login feel)
+  // State to hold text submissions per assignment ID
+  const [subContents, setSubContents] = useState<{ [key: number]: string }>({});
+  
+  // State to hold file attachments per assignment ID (Base64 data / File object)
+  const [subFiles, setSubFiles] = useState<{ [key: number]: { name: string; data: string } | null }>({});
+  
+  // Submission mode per assignment ID: 'text' or 'file'
+  const [subModes, setSubModes] = useState<{ [key: number]: 'text' | 'file' }>({});
+
+  // Auth Inputs
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState<'instructor' | 'unistudent' | 'outsider'>('unistudent');
@@ -30,7 +39,6 @@ function App() {
   const [vidUrl, setVidUrl] = useState('');
   const [assTitle, setAssTitle] = useState('');
   const [assDesc, setAssDesc] = useState('');
-  const [subContent, setSubContent] = useState('');
   const [gradeMarks, setGradeMarks] = useState<number | ''>('');
   const [gradeFeedback, setGradeFeedback] = useState('');
 
@@ -78,14 +86,15 @@ function App() {
   const handleLogout = () => {
     setCurrentUser(null);
     setModalType(null);
-    
-    // Clear the form data
     setEmail('');
     setPassword('');
     setRole('unistudent');
-    setIsRegistering(false); // Returns the view to the "Sign In" tab
+    setIsRegistering(false);
+    setSubContents({});
+    setSubFiles({});
+    setSubModes({});
   };
-  // Modals & Actions
+
   const handleCreateCourse = async (e: FormEvent) => {
     e.preventDefault();
     if (!currentUser) return;
@@ -152,18 +161,79 @@ function App() {
     }
   };
 
+  // Convert uploaded file to Base64 data string
+  // Convert uploaded file to Base64 safely
+  const handleFileChange = (assignmentId: number, file: File | null) => {
+    if (!file) {
+      setSubFiles(prev => ({ ...prev, [assignmentId]: null }));
+      return;
+    }
+
+    // Optional size check: prevent uploading files larger than 10MB
+    if (file.size > 10 * 1024 * 1024) {
+      alert("File is too large! Please select a file under 10MB.");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      setSubFiles(prev => ({
+        ...prev,
+        [assignmentId]: {
+          name: file.name,
+          data: reader.result as string
+        }
+      }));
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleSubmitAssignment = async (e: FormEvent, courseId: number, assignmentId: number) => {
     e.preventDefault();
     if (!currentUser) return;
-    await api.submitAssignmentApi({
-      assignmentId,
-      courseId,
-      studentEmail: currentUser.email,
-      studentName: currentUser.name,
-      content: subContent
-    });
-    setSubContent('');
-    loadAllData();
+    
+    const mode = subModes[assignmentId] || 'text';
+    let contentToSave = '';
+
+    if (mode === 'file') {
+      const fileInfo = subFiles[assignmentId];
+      if (!fileInfo || !fileInfo.data) {
+        alert("Please choose a file first.");
+        return;
+      }
+      // Format file with name and base64 string
+      contentToSave = `[FILE]:${fileInfo.name}|${fileInfo.data}`;
+    } else {
+      contentToSave = subContents[assignmentId] || '';
+      if (!contentToSave.trim()) {
+        alert("Please enter a response or link before submitting.");
+        return;
+      }
+    }
+
+    try {
+      const response = await api.submitAssignmentApi({
+        assignmentId,
+        courseId,
+        studentEmail: currentUser.email,
+        studentName: currentUser.name,
+        content: contentToSave
+      });
+
+      if (response && response.success === false) {
+        alert("Submission Error: " + response.message);
+        return;
+      }
+
+      // Clear state for this assignment upon success
+      setSubContents(prev => ({ ...prev, [assignmentId]: '' }));
+      setSubFiles(prev => ({ ...prev, [assignmentId]: null }));
+      alert("Assignment submitted successfully!");
+      await loadAllData();
+    } catch (error) {
+      console.error("Submission error:", error);
+      alert("Failed to submit assignment. Check if your backend server (Express) body limit is set to 50mb.");
+    }
   };
 
   const handleSaveGrade = async (e: FormEvent) => {
@@ -174,6 +244,49 @@ function App() {
     setGradeMarks('');
     setGradeFeedback('');
     loadAllData();
+  };
+
+  // Helper to render submission text, links, or downloadable file attachments
+  const renderSubmissionContent = (rawContent: string) => {
+    if (!rawContent) return <i>No content provided.</i>;
+
+    // Check if submission is a File
+    if (rawContent.startsWith('[FILE]:')) {
+      const payload = rawContent.replace('[FILE]:', '');
+      const [fileName, fileData] = payload.split('|');
+      return (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <span>📎 <strong>File:</strong> {fileName || 'Attachment'}</span>
+          {fileData && (
+            <a 
+              href={fileData} 
+              download={fileName || 'submission_file'} 
+              style={{ color: '#2563eb', textDecoration: 'underline', fontWeight: 600, fontSize: '13px' }}
+            >
+              Download
+            </a>
+          )}
+        </div>
+      );
+    }
+
+    // Check if submission is a Web Link
+    const isUrl = /^https?:\/\/[^\s]+$/i.test(rawContent.trim());
+    if (isUrl) {
+      return (
+        <a 
+          href={rawContent.trim()} 
+          target="_blank" 
+          rel="noreferrer" 
+          style={{ color: '#2563eb', textDecoration: 'underline', wordBreak: 'break-all' }}
+        >
+          🔗 {rawContent.trim()}
+        </a>
+      );
+    }
+
+    // Plain text submission
+    return <span style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>"{rawContent}"</span>;
   };
 
   const activeCourse = courses.find(c => c.id === activeCourseId);
@@ -204,7 +317,6 @@ function App() {
               overflow: 'hidden',
               padding: '36px 32px'
             }}>
-              {/* Card Header & Branding */}
               <div style={{ textAlign: 'center', marginBottom: '28px' }}>
                 <h2 style={{ margin: '0 0 6px 0', fontSize: '24px', fontWeight: '700', color: '#0f172a' }}>
                   {isRegistering ? 'Create your Account' : 'Welcome to CloverLMS'}
@@ -214,7 +326,6 @@ function App() {
                 </p>
               </div>
 
-              {/* Toggle Tabs */}
               <div style={{
                 display: 'flex',
                 backgroundColor: '#f1f5f9',
@@ -272,7 +383,6 @@ function App() {
                 </button>
               </div>
 
-              {/* Form */}
               <form onSubmit={handleAuth} style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
                 <div>
                   <label style={{ display: 'block', fontSize: '13px', fontWeight: '600', color: '#334155', marginBottom: '6px' }}>
@@ -410,15 +520,24 @@ function App() {
                 <h3 style={{ marginTop: '40px' }}>Student Enrollment & Project Marks Report</h3>
                 <table>
                   <thead>
-                    <tr><th>Student</th><th>Course</th><th>Assignment</th><th>Status</th><th>Marks</th><th>Feedback</th><th>Action</th></tr>
+                    <tr>
+                      <th>Student</th>
+                      <th>Course</th>
+                      <th>Assignment</th>
+                      <th>Submission Content</th>
+                      <th>Status</th>
+                      <th>Marks</th>
+                      <th>Feedback</th>
+                      <th>Action</th>
+                    </tr>
                   </thead>
                   <tbody>
                     {submissions.map(s => {
-                      // Handle both camelCase and snake_case from the backend API
                       const currentCourseId = s.courseId || (s as any).course_id;
                       const currentAssignmentId = s.assignmentId || (s as any).assignment_id;
                       const studentName = s.studentName || (s as any).student_name || 'Unknown Student';
                       const studentEmail = s.studentEmail || (s as any).student_email || 'No email';
+                      const submissionText = s.content || (s as any).submission_text || (s as any).sub_content || '';
                       
                       const course = courses.find(c => c.id === currentCourseId);
                       const assignmentName = course?.assignments?.find(a => a.id === currentAssignmentId)?.title || 'Task';
@@ -428,6 +547,18 @@ function App() {
                           <td>{studentName}<br/><small style={{ color: '#666' }}>{studentEmail}</small></td>
                           <td>{course?.title || 'Unknown Course'}</td>
                           <td>{assignmentName}</td>
+                          <td style={{ maxWidth: '300px', padding: '12px 8px' }}>
+                            <div style={{ 
+                              fontSize: '13px', 
+                              color: '#334155',
+                              backgroundColor: '#f8fafc',
+                              padding: '6px 10px',
+                              borderRadius: '6px',
+                              border: '1px solid #e2e8f0'
+                            }}>
+                              {renderSubmissionContent(submissionText)}
+                            </div>
+                          </td>
                           <td><span className={`badge ${s.status === 'Graded' ? 'badge-success' : 'badge-pending'}`}>{s.status}</span></td>
                           <td>{s.marks !== null ? `${s.marks}/100` : 'N/A'}</td>
                           <td>{s.feedback || '-'}</td>
@@ -568,7 +699,6 @@ function App() {
                   <button className="btn btn-outline" style={{ padding: '6px 14px', fontSize: '13px' }} onClick={() => setModalType(null)}>Close</button>
                 </div>
 
-                {/* Course Tabs */}
                 <div style={{
                   display: 'flex',
                   backgroundColor: '#f1f5f9',
@@ -622,7 +752,6 @@ function App() {
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                       {activeCourse.videos && activeCourse.videos.length > 0 ? (
                         activeCourse.videos.map(v => {
-                          // Extract exact YouTube ID and build a clean embed URL
                           let embedUrl = v.url;
                           const ytRegex = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
                           const match = v.url.match(ytRegex);
@@ -634,8 +763,6 @@ function App() {
                           return (
                             <div key={v.id} style={{ display: 'flex', flexDirection: 'column', backgroundColor: '#ffffff', padding: '16px', borderRadius: '10px', border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.05)', gap: '12px' }}>
                               <h5 style={{ margin: 0, fontSize: '17px', color: '#0f172a' }}>{v.title}</h5>
-                              
-                              {/* Responsive 16:9 Video Container */}
                               <div style={{ position: 'relative', paddingBottom: '56.25%', height: 0, overflow: 'hidden', borderRadius: '6px', backgroundColor: '#000' }}>
                                 <iframe 
                                   src={embedUrl}
@@ -663,6 +790,8 @@ function App() {
                             (s.studentEmail === currentUser?.email || (s as any).student_email === currentUser?.email)
                           );
                           
+                          const mode = subModes[a.id] || 'text';
+
                           return (
                             <div key={a.id} style={{ backgroundColor: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '20px', boxShadow: '0 1px 3px rgba(0,0,0,0.05)' }}>
                               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
@@ -704,22 +833,76 @@ function App() {
                                 </div>
                               ) : (
                                 <form onSubmit={e => handleSubmitAssignment(e, activeCourse.id, a.id)} style={{ marginTop: '12px' }}>
-                                  <textarea 
-                                    placeholder="Paste submission link or text here..." 
-                                    value={subContent} 
-                                    onChange={e => setSubContent(e.target.value)} 
-                                    required 
-                                    style={{ 
-                                      width: '100%', 
-                                      minHeight: '90px', 
-                                      padding: '12px', 
-                                      borderRadius: '6px', 
-                                      border: '1px solid #cbd5e1', 
-                                      marginBottom: '12px', 
-                                      fontSize: '14px',
-                                      boxSizing: 'border-box'
-                                    }}
-                                  />
+                                  {/* Mode Switcher: Link/Text vs File */}
+                                  <div style={{ display: 'flex', gap: '10px', marginBottom: '12px' }}>
+                                    <button
+                                      type="button"
+                                      onClick={() => setSubModes(prev => ({ ...prev, [a.id]: 'text' }))}
+                                      style={{
+                                        padding: '6px 12px',
+                                        fontSize: '13px',
+                                        borderRadius: '6px',
+                                        border: '1px solid #cbd5e1',
+                                        cursor: 'pointer',
+                                        backgroundColor: mode === 'text' ? '#e2e8f0' : '#ffffff',
+                                        fontWeight: mode === 'text' ? 'bold' : 'normal'
+                                      }}
+                                    >
+                                      📝 Text or Link
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setSubModes(prev => ({ ...prev, [a.id]: 'file' }))}
+                                      style={{
+                                        padding: '6px 12px',
+                                        fontSize: '13px',
+                                        borderRadius: '6px',
+                                        border: '1px solid #cbd5e1',
+                                        cursor: 'pointer',
+                                        backgroundColor: mode === 'file' ? '#e2e8f0' : '#ffffff',
+                                        fontWeight: mode === 'file' ? 'bold' : 'normal'
+                                      }}
+                                    >
+                                      📁 Attach File
+                                    </button>
+                                  </div>
+
+                                  {mode === 'file' ? (
+                                    <div style={{ marginBottom: '12px' }}>
+                                      <input 
+                                        type="file" 
+                                        onChange={e => handleFileChange(a.id, e.target.files ? e.target.files[0] : null)}
+                                        style={{ 
+                                          width: '100%', 
+                                          padding: '10px', 
+                                          borderRadius: '6px', 
+                                          border: '1px solid #cbd5e1',
+                                          backgroundColor: '#f8fafc',
+                                          boxSizing: 'border-box' 
+                                        }} 
+                                      />
+                                    </div>
+                                  ) : (
+                                    <textarea 
+                                      placeholder="Paste submission link (e.g. Google Drive/GitHub) or type response..." 
+                                      value={subContents[a.id] || ''} 
+                                      onChange={e => {
+                                        const text = e.target.value;
+                                        setSubContents(prev => ({ ...prev, [a.id]: text }));
+                                      }} 
+                                      style={{ 
+                                        width: '100%', 
+                                        minHeight: '90px', 
+                                        padding: '12px', 
+                                        borderRadius: '6px', 
+                                        border: '1px solid #cbd5e1', 
+                                        marginBottom: '12px', 
+                                        fontSize: '14px',
+                                        boxSizing: 'border-box'
+                                      }}
+                                    />
+                                  )}
+
                                   <button type="submit" className="btn" style={{ padding: '10px 20px', fontSize: '14px' }}>
                                     Submit Assignment
                                   </button>
@@ -741,10 +924,32 @@ function App() {
             {modalType === 'grade' && activeSubmission && (
               <form onSubmit={handleSaveGrade}>
                 <h3>Grade Submission</h3>
-                <p><strong>Student:</strong> {activeSubmission.studentName}</p>
-                <div className="form-group"><label>Marks (0-100)</label><input type="number" min="0" max="100" value={gradeMarks} onChange={e => setGradeMarks(Number(e.target.value))} required /></div>
-                <div className="form-group"><label>Feedback</label><textarea value={gradeFeedback} onChange={e => setGradeFeedback(e.target.value)} required></textarea></div>
-                <button type="submit" className="btn">Save Grade</button>
+                <p style={{ margin: '4px 0 12px 0', fontSize: '15px' }}>
+                  <strong>Student:</strong> {activeSubmission.studentName || (activeSubmission as any).student_name || 'Student'}
+                </p>
+                
+                <div style={{ marginBottom: '16px', padding: '12px', backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px' }}>
+                  <label style={{ display: 'block', fontSize: '13px', fontWeight: '600', color: '#475569', marginBottom: '6px' }}>
+                    Submitted Work:
+                  </label>
+                  <div style={{ backgroundColor: '#ffffff', padding: '10px', borderRadius: '6px', border: '1px solid #cbd5e1' }}>
+                    {renderSubmissionContent(activeSubmission.content || (activeSubmission as any).submission_text || (activeSubmission as any).sub_content || '')}
+                  </div>
+                </div>
+
+                <div className="form-group">
+                  <label>Marks (0-100)</label>
+                  <input type="number" min="0" max="100" value={gradeMarks} onChange={e => setGradeMarks(Number(e.target.value))} required />
+                </div>
+                <div className="form-group">
+                  <label>Feedback</label>
+                  <textarea value={gradeFeedback} onChange={e => setGradeFeedback(e.target.value)} required></textarea>
+                </div>
+                
+                <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '16px' }}>
+                  <button type="button" className="btn btn-outline" onClick={() => setModalType(null)}>Cancel</button>
+                  <button type="submit" className="btn">Save Grade</button>
+                </div>
               </form>
             )}
 
