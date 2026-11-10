@@ -228,7 +228,6 @@ function App() {
       // Clear state for this assignment upon success
       setSubContents(prev => ({ ...prev, [assignmentId]: '' }));
       setSubFiles(prev => ({ ...prev, [assignmentId]: null }));
-      alert("Assignment submitted successfully!");
       await loadAllData();
     } catch (error) {
       console.error("Submission error:", error);
